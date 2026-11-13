@@ -450,7 +450,7 @@ static int do_memory_write(ifd_reader_t * reader, int unit,
 			   ct_tlv_parser_t * args, ct_tlv_builder_t * resp)
 {
 	unsigned char *data;
-	unsigned int data_len;
+	size_t data_len;
 	unsigned int address;
 	int rc;
 
