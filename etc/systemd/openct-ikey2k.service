@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenCT readers and reconnect monitor for Rainbow iKey 2032
+Before=pcscd.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+RuntimeDirectory=openct
+ExecStart=/usr/lib/openct/watch-ikey2k
+ExecStopPost=-/usr/bin/openct-control shutdown
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

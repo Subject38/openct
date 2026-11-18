@@ -135,50 +135,42 @@ int ct_status(const ct_info_t ** result)
 
 ct_info_t *ct_status_alloc_slot(int *num)
 {
-	ct_info_t *info;
+	ct_info_t *info, *slot = NULL;
 	size_t size;
-	unsigned int n, max;
+	unsigned int max, index, end;
+	sigset_t blocked, previous;
 
-	info = (ct_info_t *) ct_map_status(O_RDWR, &size);
-	if (info == NULL)
+	info = ct_map_status(O_RDWR, &size);
+	if (!info)
 		return NULL;
+	max = size / sizeof(*info);
+	if (*num < -1 || (*num >= 0 && (unsigned int)*num >= max))
+		goto done;
 
-	max = size / sizeof(ct_info_t);
-	if (*num == -1) {
-		sigset_t sigset;
-
-		/* Block all signals while holding the lock */
-		sigfillset(&sigset);
-		sigprocmask(SIG_SETMASK, &sigset, &sigset);
-
-		/* Lock the status file against concurrent access */
-		ct_status_lock();
-
-		/* find a free slot */
-		for (n = 0; n < max; n++, info) {
-			if (info[n].ct_pid == 0
-			    || (kill(info[n].ct_pid, 0) < 0
-				&& errno == ESRCH)) {
-				*num = n;
-				break;
-			}
+	sigfillset(&blocked);
+	if (sigprocmask(SIG_BLOCK, &blocked, &previous) < 0)
+		goto done;
+	if (ct_status_lock() == 0) {
+		index = *num < 0 ? 0 : (unsigned int)*num;
+		end = *num < 0 ? max : index + 1;
+		for (; index < end; index++) {
+			if (info[index].ct_pid != 0 &&
+			    (kill(info[index].ct_pid, 0) == 0 || errno != ESRCH))
+				continue;
+			slot = &info[index];
+			memset(slot, 0, sizeof(*slot));
+			slot->ct_pid = getpid();
+			*num = index;
+			break;
 		}
-
-		/* Done, unlock the file again */
 		ct_status_unlock();
-
-		/* unblock signals */
-		sigprocmask(SIG_SETMASK, &sigset, NULL);
-	} else if (*num >= max) {
-		munmap((void *)info, size);
-		return NULL;
 	}
+	sigprocmask(SIG_SETMASK, &previous, NULL);
 
-	memset(&info[*num], 0, sizeof(ct_info_t));
-	info[*num].ct_pid = getpid();
-
-	msync((void *)info, size, MS_SYNC);
-	return info + *num;
+done:
+	if (!slot)
+		munmap(info, size);
+	return slot;
 }
 
 #define ALIGN(x, size)	(((caddr_t) (x)) - ((unsigned long) (x) % (size)))

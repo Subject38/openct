@@ -609,7 +609,9 @@ char CT_close(unsigned short ctn)
             else
                 cardTerminals = curr->next;
 
+            ct_reader_disconnect(curr->h);
             free(curr);
+            break;
         }
         else
         {
@@ -626,11 +628,14 @@ char CT_data(unsigned short ctn, unsigned char *dad, unsigned char *sad,
 	     unsigned char *rsp)
 {
 	struct CardTerminal **ct;
+	ct_info_t info;
 	int rc;
 
 	for (ct = &cardTerminals; *ct && (*ct)->ctn != ctn; ct = &(*ct)->next) ;
 	if ((*ct) == (struct CardTerminal *)0 || !sad || !dad)
 		return ERR_INVALID;
+	if (ct_reader_status((*ct)->h, &info) < 0)
+		return ERR_TRANS;
 
 #if 0
 	ct_debug("CT_data(dad=%d lc=%u lr=%u cmd=%s",

@@ -22,7 +22,7 @@
 
 struct ct_handle {
 	ct_socket_t *sock;
-	unsigned int index;	/* reader index */
+	pid_t pid;		/* handler that owns this connection */
 	unsigned int card[OPENCT_MAX_SLOTS];	/* card seq */
 	const ct_info_t *info;
 };
@@ -40,7 +40,7 @@ int ct_reader_info(unsigned int reader, ct_info_t * result)
 	const ct_info_t *info;
 	int rc;
 
-	if ((rc = ct_status(&info)) < 0 || reader > (unsigned int)rc)
+	if ((rc = ct_status(&info)) < 0 || reader >= (unsigned int)rc)
 		return -1;
 
 	/* Make sure the server process is alive */
@@ -70,7 +70,7 @@ ct_handle *ct_reader_connect(unsigned int reader)
 		return NULL;
 	}
 
-	if ((rc = ct_status(&info)) < 0 || reader > (unsigned int)rc)
+	if ((rc = ct_status(&info)) < 0 || reader >= (unsigned int)rc)
 		return NULL;
 
 	if (!(h = (ct_handle *) calloc(1, sizeof(*h))))
@@ -80,12 +80,14 @@ ct_handle *ct_reader_connect(unsigned int reader)
 		free(h);
 		return NULL;
 	}
-	if (ct_socket_connect(h->sock, path) < 0) {
+	h->info = info + reader;
+	h->pid = h->info->ct_pid;
+	if (!h->pid || ct_socket_connect(h->sock, path) < 0 ||
+	    h->info->ct_pid != h->pid) {
 		ct_reader_disconnect(h);
 		return NULL;
 	}
 
-	h->info = info + reader;
 	return h;
 }
 
@@ -106,6 +108,9 @@ void ct_reader_disconnect(ct_handle * h)
 int ct_reader_status(ct_handle * h, ct_info_t * info)
 {
 	*info = *h->info;
+	if (info->ct_pid != h->pid ||
+	    (kill(h->pid, 0) < 0 && errno == ESRCH))
+		return IFD_ERROR_COMM_ERROR;
 	return 0;
 }
 

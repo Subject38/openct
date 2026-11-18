@@ -122,6 +122,17 @@ int main(int argc, char **argv)
 		int r = -1;
 		char path[PATH_MAX];
 
+		if (opt_reader) {
+			char *end;
+			long index = strtol(opt_reader, &end, 10);
+
+			if (end == opt_reader || *end || index < 0 ||
+			    index >= OPENCT_MAX_READERS) {
+				ct_error("invalid reader index: %s", opt_reader);
+				return 1;
+			}
+			r = (int)index;
+		}
 		status = ct_status_alloc_slot(&r);
 		if (status == NULL) {
 			ct_error("too many readers, no reader slot available");

@@ -1,0 +1,137 @@
+#!/bin/bash
+# Keep one handler per stable USB port. Reconnects do not restart PC/SC.
+set -euo pipefail
+
+usb_root=/sys/bus/usb/devices
+runtime=/run/openct
+settle=5
+declare -A usb=() observed=() changed=() slot=() owner=() pid=()
+declare -A ready=() stopping=() started=() retry_at=()
+rescan_at=0
+
+usb_snapshot() {
+  local device vendor product bus dev
+  for device in "$usb_root"/*; do
+    [[ -r "$device/idVendor" && -r "$device/idProduct" ]] || continue
+    read -r vendor < "$device/idVendor" || continue
+    read -r product < "$device/idProduct" || continue
+    [[ $vendor == 04b9 && $product == 1202 ]] || continue
+    read -r bus < "$device/busnum" || continue
+    read -r dev < "$device/devnum" || continue
+    [[ $bus =~ ^[0-9]+$ && $dev =~ ^[0-9]+$ ]] || continue
+    # Include the USB address: a reconnect on the same port needs a new handler.
+    printf '%s /dev/bus/usb/%03d/%03d\n' "${device##*/}" "$((10#$bus))" "$((10#$dev))"
+  done
+}
+
+reader_ready() {
+    [[ -S "$runtime/$1" ]]
+}
+
+request_rescan() {
+    if ((rescan_at == 0)); then
+        rescan_at=$SECONDS
+        ((rescan_at > 0)) || rescan_at=1
+    fi
+}
+
+refresh_pcsc() {
+    # PC/SC removes dead readers and discovers new readers on rescan.
+    # Send no restart job, so existing contexts stay live.
+    if systemctl is-active --quiet pcscd.service; then
+        systemctl --no-block reload pcscd.service
+    fi
+}
+
+scan() {
+    local port node now index
+    now=$SECONDS
+    usb=()
+    while read -r port node; do
+        [[ -n $port ]] || continue
+        usb[$port]=$node
+    done < <(usb_snapshot)
+
+    for port in "${!observed[@]}" "${!usb[@]}"; do
+        node=${usb[$port]:-}
+        if [[ ${observed[$port]:-} != "$node" ]]; then
+            observed[$port]=$node
+            changed[$port]=$now
+        fi
+
+        if [[ ${pid[$port]:-} ]]; then
+            index=${slot[$port]}
+            if ! kill -0 "${pid[$port]}" 2>/dev/null; then
+                wait "${pid[$port]}" 2>/dev/null || true
+                rm -f -- "$runtime/$index"
+                [[ ! ${ready[$port]:-} ]] || request_rescan
+                unset 'pid[$port]' 'ready[$port]' 'stopping[$port]'
+                retry_at[$port]=$((now + settle))
+            elif [[ ! ${stopping[$port]:-} ]]; then
+                if [[ $node != "${started[$port]}" ]] ||
+                   { [[ ! ${ready[$port]:-} && $((now - retry_at[$port])) -ge 5 ]] &&
+                     ! reader_ready "$index"; }; then
+                    kill "${pid[$port]}" 2>/dev/null || true
+                    stopping[$port]=1
+                elif [[ ! ${ready[$port]:-} ]] && reader_ready "$index"; then
+                    ready[$port]=1
+                    echo "OpenCT reader $index ready on USB port $port"
+                    request_rescan
+                fi
+            fi
+            continue
+        fi
+
+        [[ -n $node ]] || continue
+        (( now - changed[$port] >= settle && now >= ${retry_at[$port]:-0} )) || continue
+        if [[ ! ${slot[$port]:-} ]]; then
+            for ((index=0; index<16; index++)); do
+                [[ ! ${owner[$index]:-} ]] && break
+            done
+            if ((index == 16)); then
+                # Reuse a departed port's slot only when it has no live handler.
+                for ((index=0; index<16; index++)); do
+                    local previous=${owner[$index]}
+                    [[ ! ${pid[$previous]:-} && ! ${usb[$previous]:-} ]] || continue
+                    unset 'slot[$previous]' 'owner[$index]'
+                    break
+                done
+            fi
+            ((index < 16)) || continue
+            slot[$port]=$index
+            owner[$index]=$port
+        fi
+
+        index=${slot[$port]}
+        ifdhandler -F -H -p -r "$index" ikey2k usb "$node" &
+        pid[$port]=$!
+        started[$port]=$node
+        retry_at[$port]=$now
+    done
+    return 0
+}
+
+main() {
+    local ready_at=$((SECONDS + settle + 2)) notified=0
+    trap 'exit 0' TERM INT
+    openct-control -n init
+    while true; do
+        scan
+        if ((!notified && SECONDS >= ready_at)); then
+            systemd-notify --ready --status="Watching iKey USB ports"
+            notified=1
+        fi
+        if ((notified && rescan_at && SECONDS >= rescan_at)); then
+            if refresh_pcsc; then
+                rescan_at=0
+            else
+                rescan_at=$((SECONDS + settle))
+            fi
+        fi
+        sleep 1
+    done
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
