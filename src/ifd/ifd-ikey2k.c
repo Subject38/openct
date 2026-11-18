@@ -7,8 +7,10 @@
  */
 
 #include "internal.h"
+#include "atr.h"
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 
 
 #ifndef min
@@ -245,6 +247,73 @@ failed:
 }
 
 /*
+ * Negotiate the receive block size used by the vendor's iKey 2032 driver.
+ * The IC's send block limit is independent of this setting.
+ */
+static int ikey2k_set_protocol(ifd_reader_t *reader, int idx, int prot)
+{
+	ifd_slot_t *slot;
+	ifd_protocol_t *p;
+	const int ifsd = 180;
+
+	if (idx < 0 || (unsigned int)idx >= reader->nslots)
+		return -1;
+	if (prot == IFD_PROTOCOL_DEFAULT)
+		prot = IFD_PROTOCOL_T0;
+	slot = &reader->slot[idx];
+	if (slot->proto && slot->proto->ops->id == prot)
+		return 0;
+
+	p = ifd_protocol_new(prot, reader, slot->dad);
+	if (!p)
+		return -1;
+
+	if (prot == IFD_PROTOCOL_T1) {
+		ifd_atr_info_t atr_info;
+		int ifsc = 32;
+
+		/* TA3 gives the card's receive limit. The vendor sends the
+		 * 144-byte RSA command in one I-block on these cards. */
+		if (slot->atr_len >= 2 &&
+		    ifd_atr_parse(&atr_info, slot->atr, slot->atr_len) == 0 &&
+		    atr_info.default_protocol == IFD_PROTOCOL_T1 &&
+		    atr_info.TA[2] >= 16 && atr_info.TA[2] <= 254)
+			ifsc = atr_info.TA[2];
+		ifd_protocol_set_parameter(p, IFD_PROTOCOL_T1_IFSC, ifsc);
+
+		if (t1_negotiate_ifsd(p, slot->dad, ifsd) > 0) {
+			ifd_protocol_set_parameter(p, IFD_PROTOCOL_T1_IFSD, ifsd);
+			syslog(LOG_INFO, "iKey 2032 T=1 block limits: send %d, receive %d",
+			       ifsc, ifsd);
+		} else {
+			unsigned char atr[sizeof(slot->atr)];
+			int len;
+
+			/* The card may have accepted a request whose reply was lost.
+			 * Reset both sides before falling back to the default size. */
+			ifd_protocol_free(p);
+			if (slot->proto) {
+				ifd_protocol_free(slot->proto);
+				slot->proto = NULL;
+			}
+			len = ikey2k_card_reset(reader, idx, atr, sizeof(atr));
+			if (len < 0 || (size_t)len != slot->atr_len ||
+			    memcmp(atr, slot->atr, len) != 0)
+				return -1;
+			p = ifd_protocol_new(prot, reader, slot->dad);
+			if (!p)
+				return -1;
+			ct_error("iKey 2032 IFSD negotiation failed; using default T=1 blocks");
+		}
+	}
+
+	if (slot->proto)
+		ifd_protocol_free(slot->proto);
+	slot->proto = p;
+	return 0;
+}
+
+/*
  * Send/receive routines.
  */
 static int ikey2k_send(ifd_reader_t * reader, unsigned int dad,
@@ -269,6 +338,7 @@ const static struct ifd_driver_ops ikey2k_driver = {
 	.deactivate  = ikey2k_deactivate,
 	.card_status = ikey2k_card_status,
 	.card_reset  = ikey2k_card_reset,
+	.set_protocol = ikey2k_set_protocol,
 	.send        = ikey2k_send,
 	.recv        = ikey2k_recv,
 };

@@ -605,7 +605,7 @@ int t1_negotiate_ifsd(ifd_protocol_t * proto, unsigned int dad, int ifsd)
 	/* Initialize send/recv buffer */
 	ct_buf_set(&sbuf, (void *)snd_buf, snd_len);
 
-	while (1) {
+	do {
 		/* Build the block */
 		slen =
 		    t1_build(t1, sdata, dad, T1_S_BLOCK | T1_S_IFS, &sbuf,
@@ -617,10 +617,8 @@ int t1_negotiate_ifsd(ifd_protocol_t * proto, unsigned int dad, int ifsd)
 			goto error;
 		}
 
-		if (!t1_verify_checksum(t1, sdata, n)) {
+		if (n != 4 + t1->rc_bytes || !t1_verify_checksum(t1, sdata, n)) {
 			ifd_debug(1, "checksum failed");
-			if (retries == 0)
-				goto error;
 			continue;
 		}
 		pcb = sdata[1];
@@ -628,13 +626,9 @@ int t1_negotiate_ifsd(ifd_protocol_t * proto, unsigned int dad, int ifsd)
 		    T1_S_TYPE(pcb) == T1_S_IFS && T1_S_IS_RESPONSE(pcb)) {
 			if (sdata[LEN] != 1 || sdata[DATA] != ifsd)
 				goto error;
-			break;
+			return n;
 		}
-		if (retries == 0)
-			goto error;
-	}
-
-	return n;
+	} while (retries--);
 
       error:
 	t1_resynchronize(proto, dad);
