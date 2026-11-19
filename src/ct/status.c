@@ -26,7 +26,6 @@
 #include <openct/logging.h>
 
 static int ct_status_lock(void);
-static void ct_status_unlock(void);
 
 static void *ct_map_status(int flags, size_t * size)
 {
@@ -138,6 +137,7 @@ ct_info_t *ct_status_alloc_slot(int *num)
 	ct_info_t *info, *slot = NULL;
 	size_t size;
 	unsigned int max, index, end;
+	int lock_fd;
 	sigset_t blocked, previous;
 
 	info = ct_map_status(O_RDWR, &size);
@@ -150,7 +150,8 @@ ct_info_t *ct_status_alloc_slot(int *num)
 	sigfillset(&blocked);
 	if (sigprocmask(SIG_BLOCK, &blocked, &previous) < 0)
 		goto done;
-	if (ct_status_lock() == 0) {
+	lock_fd = ct_status_lock();
+	if (lock_fd >= 0) {
 		index = *num < 0 ? 0 : (unsigned int)*num;
 		end = *num < 0 ? max : index + 1;
 		for (; index < end; index++) {
@@ -163,7 +164,7 @@ ct_info_t *ct_status_alloc_slot(int *num)
 			*num = index;
 			break;
 		}
-		ct_status_unlock();
+		close(lock_fd);
 	}
 	sigprocmask(SIG_SETMASK, &previous, NULL);
 
@@ -200,40 +201,20 @@ int ct_status_update(ct_info_t * status)
  */
 static int ct_status_lock(void)
 {
-	int fd, retries = 10;
-	int ret = -1;
-	char status_lock_path[PATH_MAX];
-	char status_temp_path[PATH_MAX];
+	char path[PATH_MAX];
+	struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+	int fd;
 
-	if (!ct_format_path(status_lock_path, PATH_MAX, "status.lock")) {
+	if (!ct_format_path(path, sizeof(path), "status.lock"))
 		return -1;
-	}
-
-	snprintf(status_temp_path, PATH_MAX,
-		 "%s.%u", status_lock_path, (unsigned int)getpid());
-
-	if ((fd = open(status_temp_path, O_CREAT | O_RDWR, 0600)) < 0)
+	fd = open(path, O_CREAT | O_RDWR, 0600);
+	if (fd < 0)
 		return -1;
 
-	while (retries--) {
-		if (link(status_temp_path, status_lock_path) >= 0) {
-			ret = 0;
-			break;
-		}
+	/* Closing the descriptor or exiting releases the lock, even on SIGKILL. */
+	if (fcntl(fd, F_SETLKW, &lock) < 0) {
+		close(fd);
+		return -1;
 	}
-
-	close(fd);
-	unlink(status_temp_path);
-	return ret;
-}
-
-static void ct_status_unlock(void)
-{
-	char status_lock_path[PATH_MAX];
-
-	if (!ct_format_path(status_lock_path, PATH_MAX, "status.lock")) {
-		return;
-	}
-
-	unlink(status_lock_path);
+	return fd;
 }
